@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>像素风海景窗</title>
+<!--
+  像素风海景窗 · 一个挂机小窗
+  - 一扇打开的玻璃窗，两侧有蕾丝窗帘
+  - 窗外是随时间变化的大海（潮起潮落）
+  - 天空、太阳、月亮、星星、云都会随真实时间变化
+  - 墙面时钟显示真实时间（时:分:秒 + 日期）
+  - 窗台上还有小盆栽、小猫和夜灯蜡烛
+
+  运行方式：
+  1) 直接用浏览器打开本文件即可。
+  2) 或双击同目录下的 start-window.bat，以无标签页的独立窗口运行。
+  可选：在网址末尾加 ?t=时:分 可预览某个时刻（例如 ...html?t=22:30 看夜景），
+  不加参数则始终显示真实时间。
+-->
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#cba482;}
+  #stage{display:block;width:100vw;height:100vh;image-rendering:pixelated;image-rendering:crisp-edges;-webkit-app-region:no-drag;}
+  #dragbar{position:fixed;top:0;left:0;width:100%;height:30px;-webkit-app-region:drag;z-index:5;}
+</style>
+<link rel="stylesheet" href="retreat.css">
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="dragbar"><span>海边来信 · SEA RETREAT</span></div>
+<div id="window-actions" hidden><button id="pin" aria-pressed="true" title="切换窗口置顶">置顶</button><button id="hide-window" title="收起到托盘，点击托盘图标可找回">收起</button></div>
+<div class="caption"><span class="dot"></span><span id="mood">留一点时间，听海。</span></div>
+<nav class="controls" aria-label="小窗设置">
+<button id="time" title="切换真实时间、晴昼、日落、月夜">此刻</button>
+<button id="weather" title="切换晴天、细雨">晴天</button>
+<button id="sound" aria-pressed="false" title="开启或关闭全部声音">声音关</button>
+<button id="soundscape" aria-expanded="false" aria-controls="audio-panel" title="选择轻音乐与调整声音比例">声景</button>
+<button id="breathe" aria-pressed="false" title="跟着圆圈缓慢呼吸">呼吸</button>
+<button id="motion" aria-pressed="false" title="减少动态效果">慢动效</button>
+<button id="help" aria-expanded="false" title="探索小窗互动">?</button>
+</nav>
+<section id="audio-panel" hidden aria-label="声景设置">
+  <label>轻音乐 <select id="music-track"><option value="off">只听自然声</option><option value="shore">岸边慢信 · 轻柔琴音</option><option value="cloud">云朵午睡 · 八音盒</option><option value="moon">月色摇篮 · 温暖电琴</option></select></label>
+  <label>总音量 <input id="volume-master" type="range" min="0" max="100" value="50"></label>
+  <label>海浪 <input id="volume-sea" type="range" min="0" max="100" value="45"></label>
+  <label>细雨 <input id="volume-rain" type="range" min="0" max="100" value="45"></label>
+  <label>轻音乐 <input id="volume-music" type="range" min="0" max="100" value="50"></label>
+  <p>轻音乐为本地合成曲目。细雨声随天气开关；猫咪和风铃跟随总音量。请先开启「声音」。</p>
+</section>
+<div id="guide" hidden>轻点海面，或按住划过水面 · 拂过窗帘<br>摸摸小猫 · 给植物浇水 · 点亮蜡烛<br>轻碰右侧风铃 · 下方按钮也支持键盘操作</div>
+<div id="breathing" hidden><div></div><span>慢慢吸气</span></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+"use strict";
+
+// 内部低分辨率画布（像素风基础，之后放大显示）
+const W = 480, H = 360;
+const off = document.createElement('canvas');
+off.width = W; off.height = H;
+const ctx = off.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const stage = document.getElementById('stage');
+const sctx = stage.getContext('2d');
+sctx.imageSmoothingEnabled = false;
+
+// ---------- 点击互动状态 ----------
+const fx = { cat: -10, candle: -10 };
+const view = { s: 1, dx: 0, dy: 0 };
+
+// ---------- 场景布局 ----------
+const FX0 = 108, FX1 = 372, FY0 = 74, FY1 = 292, FRAME = 8;
+const GX0 = FX0 + FRAME, GX1 = FX1 - FRAME, GY0 = FY0 + FRAME, GY1 = FY1 - FRAME;
+const GLASS_W = GX1 - GX0, GLASS_H = GY1 - GY0;
+const MULL_X = (GX0 + GX1) / 2, MULL_Y = (GY0 + GY1) / 2, MULL_T = 4;
+const HORIZON_BASE = 178, TIDE_AMP = 5;
+const SX0 = 96, SX1 = 384, SY0 = 292, SY1 = 330;
+const ROD_Y = 54, ROD_X0 = 80, ROD_X1 = 400;
+const CUR_TOP = 60, CUR_BOT = 288;
+
+// ---------- 颜色 ----------
+const WALL = [203, 164, 130], WALL_DOT = [186, 146, 112];
+const FLOOR = [74, 50, 38], BASE = [122, 84, 58];
+
+// ---------- 工具函数 ----------
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t){ return a + (b - a) * t; }
+function mixC(a, b, t){ return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]; }
+function css(c, a){ a = a === undefined ? 1 : a; return 'rgba(' + (c[0]|0) + ',' + (c[1]|0) + ',' + (c[2]|0) + ',' + a + ')'; }
+
+function pcircle(cx, cy, r, col){
+  cx = Math.round(cx); cy = Math.round(cy); const R = Math.round(r);
+  ctx.fillStyle = col;
+  for(let dy = -R; dy <= R; dy++) for(let dx = -R; dx <= R; dx++){
+    if(dx*dx + dy*dy <= R*R) ctx.fillRect(cx + dx, cy + dy, 1, 1);
+  }
+}
+function pellipse(cx, cy, rx, ry, col){
+  cx = Math.round(cx); cy = Math.round(cy); const RX = Math.round(rx), RY = Math.round(ry);
+  ctx.fillStyle = col;
+  for(let dy = -RY; dy <= RY; dy++) for(let dx = -RX; dx <= RX; dx++){
+    if((dx*dx)/(RX*RX) + (dy*dy)/(RY*RY) <= 1) ctx.fillRect(cx + dx, cy + dy, 1, 1);
+  }
+}
+function pline(x0, y0, x1, y1, col){
+  ctx.fillStyle = col;
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) | 0;
+  for(let i = 0; i <= n; i++){
+    ctx.fillRect(Math.round(lerp(x0, x1, i/n)), Math.round(lerp(y0, y1, i/n)), 1, 1);
+  }
+}
+function ptri(a, b, c, col){
+  const xs = [a[0], b[0], c[0]], ys = [a[1], b[1], c[1]];
+  const x0 = Math.floor(Math.min(xs[0], xs[1], xs[2])), x1 = Math.ceil(Math.max(xs[0], xs[1], xs[2]));
+  const y0 = Math.floor(Math.min(ys[0], ys[1], ys[2])), y1 = Math.ceil(Math.max(ys[0], ys[1], ys[2]));
+  const den = (b[1]-c[1])*(a[0]-c[0]) + (c[0]-b[0])*(a[1]-c[1]);
+  if(Math.abs(den) < 1e-6) return;
+  ctx.fillStyle = col;
+  for(let y = y0; y <= y1; y++) for(let x = x0; x <= x1; x++){
+    const l1 = ((b[1]-c[1])*(x-c[0]) + (c[0]-b[0])*(y-c[1])) / den;
+    const l2 = ((c[1]-a[1])*(x-c[0]) + (a[0]-c[0])*(y-c[1])) / den;
+    const l3 = 1 - l1 - l2;
+    if(l1 >= -1e-3 && l2 >= -1e-3 && l3 >= -1e-3) ctx.fillRect(x, y, 1, 1);
+  }
+}
+function halfDisc(cx, cy, r, col){
+  cx = Math.round(cx); cy = Math.round(cy); const R = Math.round(r);
+  ctx.fillStyle = col;
+  for(let dy = 0; dy <= R; dy++) for(let dx = -R; dx <= R; dx++){
+    if(dx*dx + dy*dy <= R*R) ctx.fillRect(cx + dx, cy + dy, 1, 1);
+  }
+}
+
+// ---------- 光照与真实时间 ----------
+function lighting(t){
+  const sunH = Math.sin(Math.PI * (t - 6) / 12);      // -1(午夜) ~ +1(正午)
+  const d = clamp((sunH + 0.12) / 1.12, 0, 1);       // 白天强度 0~1
+  const dS = d * d * (3 - 2 * d);
+  const warmth = Math.max(0, 1 - Math.abs(sunH) / 0.30); // 日出日落时的暖色
+  const warmth2 = warmth * warmth;
+
+  const nightTop = [7, 9, 24],   dayTop = [64, 138, 214];
+  const nightHor = [30, 40, 72], dayHor = [172, 224, 246];
+  let skyTop = mixC(nightTop, dayTop, dS);
+  let skyHor = mixC(nightHor, dayHor, dS);
+  const warmC = [255, 150, 74];
+  skyHor = mixC(skyHor, warmC, warmth2 * 0.45);
+  skyTop = mixC(skyTop, warmC, warmth2 * 0.10);
+
+  const nSeaH = [22, 36, 68], dSeaH = [96, 176, 206];
+  const nSeaD = [8, 14, 32],  dSeaD = [16, 58, 118];
+  let seaHor = mixC(nSeaH, dSeaH, dS);
+  let seaDeep = mixC(nSeaD, dSeaD, dS);
+  seaHor = mixC(seaHor, warmC, warmth2 * 0.30);
+
+  return {
+    t, sunH, d, dS, warmth, warmth2,
+    skyTop, skyHor, seaHor, seaDeep,
+    sunOn: sunH > -0.12, moonOn: sunH < 0.12
+  };
+}
+
+function horizonY(t, animT){
+  // 真实时间驱动的潮汐（半日潮，约 12.42 小时一个周期）
+  const tide = Math.sin(2 * Math.PI * (t - 3.1) / 12.42);
+  return HORIZON_BASE + tide * TIDE_AMP + Math.sin(animT * 0.6) * 0.4;
+}
+
+function moonPhase(date){
+  // 以 2000-01-06 18:14 UTC 新月为基准，估算月相 0~1
+  const ref = Date.UTC(2000, 0, 6, 18, 14);
+  const days = (date.getTime() - ref) / 86400000;
+  const syn = 29.53058867;
+  return (((days % syn) + syn) % syn) / syn;
+}
+
+// 点击后回弹/晃动的短动画（用衰减的余弦/正弦模拟“拉开—回弹”）
+function catKick(t0, animT){
+  const e = animT - t0;
+  if(e < 0 || e > 1.1) return 0;
+  return Math.exp(-3.5 * e) * Math.cos(e * 16) * 4;
+}
+function candleKick(t0, animT){
+  const e = animT - t0;
+  if(e < 0 || e > 1.1) return 0;
+  return Math.exp(-3.0 * e) * (0.5 + 0.5 * Math.sin(e * 42)) * 0.7;
+}
+
+// ---------- 天空 ----------
+let stars = null;
+function ensureStars(){
+  if(stars) return;
+  stars = [];
+  let s = 20260907;
+  for(let i = 0; i < 48; i++){
+    s = (s * 9301 + 49297) % 233280; const x = (s % 1000) / 1000;
+    s = (s * 9301 + 49297) % 233280; const y = (s % 1000) / 1000;
+    s = (s * 9301 + 49297) % 233280; const ph = (s % 1000) / 1000;
+    stars.push([x, y, ph]);
+  }
+}
+
+let lastCelestial = null;
+
+function drawSky(L, t, animT, horizon, now){
+  const skyH = Math.max(12, horizon - GY0);
+  for(let y = GY0; y < horizon; y++){
+    const f = (y - GY0) / skyH;
+    ctx.fillStyle = css(mixC(L.skyTop, L.skyHor, f));
+    ctx.fillRect(GX0, y, GLASS_W, 1);
+  }
+  // 贴近海面的薄雾
+  ctx.fillStyle = css(mixC(L.skyHor, [255, 255, 255], 0.25), 0.45);
+  ctx.fillRect(GX0, horizon - 4, GLASS_W, 4);
+
+  ensureStars();
+  const starVis = clamp(1 - L.d * 1.6, 0, 1);
+  if(starVis > 0.02){
+    for(let i = 0; i < stars.length; i++){
+      const st = stars[i];
+      const sx = GX0 + st[0] * GLASS_W;
+      const sy = GY0 + 3 + Math.min(st[1], 0.92) * (skyH - 16);
+      const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(animT * (1 + st[2] * 2) + i * 1.7));
+      const a = starVis * tw;
+      ctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+      ctx.fillRect(Math.round(sx), Math.round(sy), 1, 1);
+      if(i % 7 === 0){
+        ctx.fillStyle = 'rgba(255,255,255,' + (a * 0.6) + ')';
+        ctx.fillRect(Math.round(sx)+1, Math.round(sy), 1, 1);
+        ctx.fillRect(Math.round(sx)-1, Math.round(sy), 1, 1);
+        ctx.fillRect(Math.round(sx), Math.round(sy)-1, 1, 1);
+        ctx.fillRect(Math.round(sx), Math.round(sy)+1, 1, 1);
+      }
+    }
+  }
+  drawSunMoon(L, t, horizon, moonPhase(now));
+  drawClouds(L, animT, horizon);
+}
+
+function drawSunMoon(L, t, horizon, phase){
+  lastCelestial = null;
+  const skyH = Math.max(12, horizon - GY0 - 6);
+  if(L.sunOn){
+    const prog = clamp((t - 6) / 12, 0, 1);
+    // 略向左偏移，避免正午太阳恰好被窗格中央的竖梃完全挡住
+    const x = GX0 + 10 + prog * (GLASS_W - 20) - 7;
+    const y = horizon - (L.sunH + 0.12) * skyH * 0.8 - 6;
+    pcircle(x, y, 9, 'rgba(255,200,110,0.18)');
+    pcircle(x, y, 7, 'rgba(255,214,130,0.32)');
+    pcircle(x, y, 5, '#ffe08a');
+    pcircle(x, y, 4, '#fff1b8');
+    lastCelestial = { x: x, color: [255, 220, 150] };
+  } else if(L.moonOn){
+    const mh = Math.sin(Math.PI * (t - 18) / 12);
+    const x = GX0 + GLASS_W * 0.72;
+    const y = horizon - (mh + 0.05) * skyH * 0.8 - 8;
+    pcircle(x, y, 8, 'rgba(190,215,255,0.16)');
+    drawMoon(x, y, 6, phase);
+    lastCelestial = { x: x, color: [200, 220, 255] };
+  }
+}
+
+function drawMoon(x, y, r, phase){
+  pcircle(x, y, r, '#ece8d6');
+  ctx.fillStyle = 'rgba(160,158,145,0.55)';
+  ctx.fillRect(Math.round(x-2), Math.round(y-1), 2, 1);
+  ctx.fillRect(Math.round(x+1), Math.round(y+2), 2, 1);
+  ctx.fillRect(Math.round(x-1), Math.round(y+2), 1, 1);
+  const a = phase * 2 * Math.PI;
+  const ox = Math.cos(a) * r * 1.5, oy = Math.sin(a) * r * 0.6;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, r + 0.5, 0, Math.PI * 2); ctx.clip();
+  pcircle(x + ox, y + oy, r, '#181b2e');
+  ctx.restore();
+}
+
+function drawClouds(L, animT, horizon){
+  if(L.d < 0.22) return;
+  const a = clamp((L.d - 0.22) / 0.5, 0, 1) * 0.9;
+  const clouds = [
+    [0.12, 0.26, 1.0, 4],
+    [0.55, 0.16, 0.8, 5],
+    [0.82, 0.38, 1.2, 3]
+  ];
+  for(let i = 0; i < clouds.length; i++){
+    const c = clouds[i];
+    const span = GLASS_W + 70;
+    const x = GX0 - 35 + ((c[0] * span + animT * c[2] * 6) % span);
+    const y = GY0 + 6 + c[1] * (horizon - GY0 - 24);
+    drawCloud(x, y, c[3], a);
+  }
+}
+
+function drawCloud(x, y, sc, a){
+  pcircle(x, y, 4 * sc, 'rgba(255,255,255,' + (a * 0.82) + ')');
+  pcircle(x + 4 * sc, y - 2 * sc, 3 * sc, 'rgba(255,255,255,' + (a * 0.82) + ')');
+  pcircle(x + 8 * sc, y, 3 * sc, 'rgba(255,255,255,' + (a * 0.72) + ')');
+  ctx.fillStyle = 'rgba(190,210,230,' + (a * 0.5) + ')';
+  ctx.fillRect(Math.round(x - 3 * sc), Math.round(y + 2 * sc), Math.round(10 * sc), Math.round(sc));
+}
+
+// ---------- 大海 ----------
+let seaSparkles = null;
+function ensureSeaSparkles(){
+  if(seaSparkles) return;
+  seaSparkles = [];
+  let s = 20260915;
+  for(let i = 0; i < 70; i++){
+    s = (s * 9301 + 49297) % 233280; const x = (s % 1000) / 1000;
+    s = (s * 9301 + 49297) % 233280; const y = (s % 1000) / 1000;
+    s = (s * 9301 + 49297) % 233280; const ph = (s % 1000) / 1000;
+    s = (s * 9301 + 49297) % 233280; const sp = 0.3 + (s % 1000) / 1000 * 0.8;
+    seaSparkles.push([x, y, ph, sp]);
+  }
+}
+
+function drawSea(L, t, animT, horizon){
+  const top = Math.round(horizon);
+  if(top >= GY1) return;
+  const seaTop = Math.max(top, GY0);
+  const seaH = Math.round(GY1 - seaTop);
+  if(seaH <= 0) return;
+
+  const img = ctx.createImageData(GLASS_W, seaH);
+  const d = img.data;
+  const sx = lastCelestial ? lastCelestial.x : null;
+  const reflColor = lastCelestial ? lastCelestial.color : [255, 255, 255];
+
+  for(let y = 0; y < seaH; y++){
+    const gy = seaTop + y;
+    // 更细密的深度分层，让海面更像细密的小格像素
+    const depth = (gy - top) / Math.max(1, GY1 - top);
+    const depthC = Math.floor(depth * 12) / 12;
+    const base = mixC(L.seaHor, L.seaDeep, depthC);
+    for(let x = 0; x < GLASS_W; x++){
+      const gx = GX0 + x;
+      // 多频率波浪，细节更丰富
+      const ph = gx * 0.28 + gy * 0.20 - animT * 1.6;
+      const w =
+        Math.sin(ph) * 0.42 +
+        Math.sin(ph * 1.7 + 1.3) * 0.25 +
+        Math.sin(ph * 3.1 + 2.7) * 0.16 +
+        Math.sin(gx * 0.07 - animT * 0.4) * 0.12;
+      const wn = w / 0.95;
+      let c;
+      if(wn > 0.62){ c = [245, 250, 255]; }
+      else if(wn > 0.18){ c = mixC(base, [214, 232, 244], 0.22); }
+      else if(wn < -0.58){ c = mixC(base, [6, 12, 28], 0.22); }
+      else { c = base; }
+      // 小格像素质感：轻微棋盘格 + 极淡的网格线
+      if(((gx + gy) & 1) === 0) c = mixC(c, [0, 0, 0], 0.035);
+      if((gx % 3 === 0) || (gy % 3 === 0)) c = mixC(c, [0, 0, 0], 0.02);
+      // 太阳/月亮下方的方块化反光
+      if(sx !== null){
+        const dxg = gx - sx;
+        const adx = Math.abs(dxg);
+        if(adx < 10){
+          const gl = (0.5 + 0.5 * Math.sin(gy * 0.7 - animT * 3.2)) * (1 - adx / 10);
+          if(((gx & 1) === (gy & 1))) c = mixC(c, reflColor, gl * 0.28);
+        }
+      }
+      const idx = (y * GLASS_W + x) * 4;
+      d[idx] = c[0]; d[idx+1] = c[1]; d[idx+2] = c[2]; d[idx+3] = 255;
+    }
+  }
+  ctx.putImageData(img, GX0, seaTop);
+  ctx.fillStyle = css(mixC(L.seaHor, [255, 255, 255], 0.22));
+  ctx.fillRect(GX0, top, GLASS_W, 1);
+
+  // 海面粒子：细碎闪光
+  drawSeaSparkles(L, animT, top, sx);
+}
+
+function drawSeaSparkles(L, animT, horizon, sx){
+  ensureSeaSparkles();
+  const seaBot = GY1;
+  const depth = Math.max(8, seaBot - horizon);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(GX0, horizon + 1, GLASS_W, seaBot - horizon - 1); ctx.clip();
+  const glow = clamp(1 - L.d * 1.3, 0, 1);
+  for(let i = 0; i < seaSparkles.length; i++){
+    const p = seaSparkles[i];
+    const px = GX0 + ((p[0] + animT * p[3] * 0.004) % 1) * GLASS_W;
+    const py = horizon + 2 + p[1] * (depth - 3);
+    const tw = 0.5 + 0.5 * Math.sin(animT * (2 + p[2] * 3) + i * 2.1);
+    const near = sx !== null ? Math.max(0, 1 - Math.abs(px - sx) / 16) : 0;
+    let a = (0.06 + 0.25 * glow + 0.30 * near) * tw;
+    if(a < 0.03) continue;
+    a = clamp(a, 0, 0.7);
+    ctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+    const sz = (i % 6 === 0) ? 2 : 1;
+    ctx.fillRect(Math.round(px), Math.round(py), sz, sz);
+  }
+  ctx.restore();
+}
+
+function drawBoat(L, animT, horizon){
+  const y = horizon + 6 + Math.sin(animT * 1.3 + 1) * 1.5;
+  const x = GX0 + GLASS_W * 0.32 + Math.sin(animT * 0.15) * 6;
+  ctx.fillStyle = '#6b4632';
+  ctx.fillRect(Math.round(x - 5), Math.round(y), 11, 3);
+  ctx.fillRect(Math.round(x - 4), Math.round(y - 1), 9, 2);
+  ctx.fillStyle = '#3a2a1f';
+  ctx.fillRect(Math.round(x), Math.round(y - 9), 1, 9);
+  ctx.fillStyle = '#f4ead2';
+  ptri([x, y - 9], [x, y - 3], [x + 7, y - 4], '#f4ead2');
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(Math.round(x - 4), Math.round(y + 3), 9, 1);
+}
+
+// ---------- 窗框与玻璃 ----------
+function drawFrame(){
+  ctx.fillStyle = 'rgba(0,0,0,0.16)';
+  ctx.fillRect(FX0 - 3, FY0 - 3, FX1 - FX0 + 6, FY1 - FY0 + 6);
+
+  // 主窗框：只画四周的边框环，留出中间的玻璃
+  ctx.fillStyle = '#8a5c38';
+  ctx.fillRect(FX0, FY0, FX1 - FX0, FRAME);
+  ctx.fillRect(FX0, FY1 - FRAME, FX1 - FX0, FRAME);
+  ctx.fillRect(FX0, FY0, FRAME, FY1 - FY0);
+  ctx.fillRect(FX1 - FRAME, FY0, FRAME, FY1 - FY0);
+
+  // 内侧高光边框
+  ctx.fillStyle = '#a9744a';
+  ctx.fillRect(FX0 + 2, FY0 + 2, FX1 - FX0 - 4, 2);
+  ctx.fillRect(FX0 + 2, FY1 - 4, FX1 - FX0 - 4, 2);
+  ctx.fillRect(FX0 + 2, FY0 + 2, 2, FY1 - FY0 - 4);
+  ctx.fillRect(FX1 - 4, FY0 + 2, 2, FY1 - FY0 - 4);
+
+  // 玻璃边缘的深色内框（只 2px，不再覆盖玻璃）
+  ctx.fillStyle = '#6f472c';
+  ctx.fillRect(GX0 - 2, GY0 - 2, GLASS_W + 4, 2);
+  ctx.fillRect(GX0 - 2, GY1, GLASS_W + 4, 2);
+  ctx.fillRect(GX0 - 2, GY0 - 2, 2, GLASS_H + 4);
+  ctx.fillRect(GX1, GY0 - 2, 2, GLASS_H + 4);
+
+  // 十字中梃
+  ctx.fillStyle = '#8a5c38';
+  ctx.fillRect(MULL_X - 2, GY0, MULL_T, GLASS_H);
+  ctx.fillRect(GX0, MULL_Y - 2, GLASS_W, MULL_T);
+  ctx.fillStyle = '#a9744a';
+  ctx.fillRect(MULL_X - 1, GY0, 1, GLASS_H);
+  ctx.fillRect(GX0, MULL_Y - 1, GLASS_W, 1);
+
+  ctx.fillStyle = '#d8c090';
+  ctx.fillRect(MULL_X + 4, MULL_Y + 6, 3, 2);
+  ctx.fillRect(GX0 + 4, MULL_Y + 6, 3, 2);
+}
+
+// ---------- 蕾丝窗帘 ----------
+function drawRod(){
+  ctx.fillStyle = '#7a5230';
+  ctx.fillRect(ROD_X0, ROD_Y, ROD_X1 - ROD_X0, 5);
+  ctx.fillStyle = '#6b4328';
+  ctx.fillRect(ROD_X0, ROD_Y + 4, ROD_X1 - ROD_X0, 1);
+  pcircle(ROD_X0 + 3, ROD_Y + 2, 5, '#8a5f3f');
+  pcircle(ROD_X1 - 3, ROD_Y + 2, 5, '#8a5f3f');
+  pcircle(ROD_X0 + 3, ROD_Y + 2, 3, '#6b4328');
+  pcircle(ROD_X1 - 3, ROD_Y + 2, 3, '#6b4328');
+}
+
+// ---------- 蕾丝窗帘（verlet 布料模拟） ----------
+const CLOTH_COLS = 14;
+const CLOTH_ROWS = 32;
+const MOUSE_R = 26;
+const mouse = { x: -999, y: -999, lx: -999, ly: -999, active: false };
+let cloths = null;
+let lastAnimT = null;
+
+function makeCloth(x0, x1){
+  const gapX = (x1 - x0) / (CLOTH_COLS - 1);
+  const gapY = (CUR_BOT - CUR_TOP) / (CLOTH_ROWS - 1);
+  const nodes = [];
+  const cons = [];
+  for(let r = 0; r < CLOTH_ROWS; r++){
+    for(let c = 0; c < CLOTH_COLS; c++){
+      const x = x0 + c * gapX;
+      const y = CUR_TOP + r * gapY;
+      nodes.push({ x: x, y: y, px: x, py: y, restX: x, restY: y, pin: r === 0 });
+    }
+  }
+  const id = (c, r) => r * CLOTH_COLS + c;
+  for(let r = 0; r < CLOTH_ROWS; r++){
+    for(let c = 0; c < CLOTH_COLS; c++){
+      if(c + 1 < CLOTH_COLS) cons.push([id(c, r), id(c + 1, r), gapX]);
+      if(r + 1 < CLOTH_ROWS) cons.push([id(c, r), id(c, r + 1), gapY]);
+      if(c + 1 < CLOTH_COLS && r + 1 < CLOTH_ROWS){
+        const diag = Math.sqrt(gapX * gapX + gapY * gapY);
+        cons.push([id(c, r), id(c + 1, r + 1), diag]);
+        cons.push([id(c + 1, r), id(c, r + 1), diag]);
+      }
+    }
+  }
+  return { nodes: nodes, cons: cons, gapX: gapX, x0: x0 };
+}
+
+function stepCloth(cloth, animT, dt){
+  const frame = dt * 60;
+  const breeze = (Math.sin(animT * 0.35) * 0.004 + Math.sin(animT * 0.57 + 2) * 0.002) * (settings.reduced ? 0.25 : 1);
+  const mvx = mouse.active ? clamp(mouse.x - mouse.lx, -5, 5) : 0;
+  const mvy = mouse.active ? clamp(mouse.y - mouse.ly, -3, 3) : 0;
+  const nodes = cloth.nodes;
+
+  for(let i = 0; i < nodes.length; i++){
+    const n = nodes[i];
+    if(n.pin) continue;
+    const vx = (n.x - n.px) * 0.78;
+    const vy = (n.y - n.py) * 0.78;
+    n.px = n.x; n.py = n.y;
+    n.x += vx + (breeze + (n.restX - n.x) * 0.035) * frame;
+    n.y += vy + (n.restY - n.y) * 0.06 * frame;
+    if(mouse.active){
+      const dx = n.x - mouse.x, dy = n.y - mouse.y;
+      const d2 = dx * dx + dy * dy;
+      if(d2 < MOUSE_R * MOUSE_R){
+        const d = Math.sqrt(d2) || 1;
+        const inf = (1 - d / MOUSE_R) * 0.065 * (settings.reduced ? 0.25 : 1);
+        n.x += mvx * inf;
+        n.y += mvy * inf;
+      }
+    }
+  }
+
+  for(let k = 0; k < 3; k++){
+    const cs = cloth.cons;
+    for(let j = 0; j < cs.length; j++){
+      const con = cs[j];
+      const a = nodes[con[0]], b = nodes[con[1]];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      const diff = (dist - con[2]) / dist;
+      const ox = dx * diff * 0.5, oy = dy * diff * 0.5;
+      if(!a.pin){ a.x += ox; a.y += oy; }
+      if(!b.pin){ b.x -= ox; b.y -= oy; }
+    }
+  }
+}
+
+function drawCloth(cloth, L){
+  const nodes = cloth.nodes;
+  const cols = CLOTH_COLS, rows = CLOTH_ROWS;
+  const gapX = cloth.gapX;
+  const x0 = cloth.x0;
+  const warm = clamp(L.d, 0, 1);
+  const lightTint = mixC([224, 234, 255], [255, 244, 214], warm); // 夜冷昼暖
+  const shadowTint = [82, 60, 40];
+  const left = [], right = [];
+  for(let r = 0; r < rows; r++){
+    left.push(nodes[r * cols]);
+    right.push(nodes[r * cols + (cols - 1)]);
+  }
+  function edgeX(edge, y){
+    for(let r = 0; r < rows - 1; r++){
+      const a = edge[r], b = edge[r + 1];
+      if((y >= a.y && y <= b.y) || (y >= b.y && y <= a.y)){
+        const t = (b.y === a.y) ? 0 : (y - a.y) / (b.y - a.y);
+        return a.x + (b.x - a.x) * t;
+      }
+    }
+    return edge[rows - 1].x;
+  }
+
+  const topY = Math.ceil(left[0].y);
+  const botY = Math.floor(left[rows - 1].y);
+  for(let y = topY; y <= botY; y++){
+    const lx = edgeX(left, y);
+    const rx = edgeX(right, y);
+    const X0 = Math.round(Math.min(lx, rx));
+    const X1 = Math.round(Math.max(lx, rx));
+    if(X1 >= X0){
+      ctx.fillStyle = 'rgba(252,247,236,0.88)';
+      ctx.fillRect(X0, y, X1 - X0 + 1, 1);
+    }
+  }
+
+  // 用布料轮廓做裁剪，避免明暗溢出到窗外
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(left[0].x, left[0].y);
+  for(let r = 1; r < rows; r++) ctx.lineTo(left[r].x, left[r].y);
+  for(let r = rows - 1; r >= 0; r--) ctx.lineTo(right[r].x, right[r].y);
+  ctx.closePath();
+  ctx.clip();
+
+  // 方向光照：被推到一侧的格子更亮/更暗，并做色阶量化
+  for(let r = 0; r < rows - 1; r++){
+    for(let c = 0; c < cols - 1; c++){
+      const a = nodes[r * cols + c];
+      const b = nodes[r * cols + c + 1];
+      const d = nodes[(r + 1) * cols + c];
+      const e = nodes[(r + 1) * cols + c + 1];
+      const avgX = (a.x + b.x + d.x + e.x) / 4;
+      let s = clamp(-(avgX - (x0 + (c + 0.5) * gapX)) / gapX * 0.8, -0.4, 0.4);
+      s = Math.round(s * 4) / 4;
+      if(s > 0.03){ ctx.fillStyle = css(lightTint, s * 0.55); }
+      else if(s < -0.03){ ctx.fillStyle = css(shadowTint, -s * 0.65); }
+      else { continue; }
+      const minX = Math.floor(Math.min(a.x, b.x, d.x, e.x));
+      const maxX = Math.ceil(Math.max(a.x, b.x, d.x, e.x));
+      const minY = Math.floor(Math.min(a.y, b.y, d.y, e.y));
+      const maxY = Math.ceil(Math.max(a.y, b.y, d.y, e.y));
+      ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    }
+  }
+
+  // 静态褶皱明暗：沿若干列画亮/暗竖条，模拟杆上收拢的褶
+  for(let c = 2; c < cols - 1; c += 2){
+    ctx.fillStyle = (c % 4 === 0) ? css(lightTint, 0.16) : css(shadowTint, 0.16);
+    for(let r = 0; r < rows - 1; r++){
+      const a = nodes[r * cols + c];
+      const b = nodes[(r + 1) * cols + c];
+      ctx.fillRect(Math.round(a.x) - 1, Math.round(a.y), 3, Math.max(1, Math.round(b.y - a.y)));
+    }
+  }
+
+  for(let r = 1; r < rows - 1; r += 2){
+    for(let c = 1; c < cols - 1; c += 2){
+      if((r + c) % 4 === 2){
+        const n = nodes[r * cols + c];
+        const hx = Math.round(n.x), hy = Math.round(n.y);
+        ctx.fillStyle = 'rgba(70,55,35,0.22)';
+        for(let dy = -1; dy <= 1; dy++){
+          for(let dx = -1; dx <= 1; dx++){
+            if(dx === 0 && dy === 0) continue;
+            ctx.fillRect(hx + dx, hy + dy, 1, 1);
+          }
+        }
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.fillRect(hx, hy, 1, 1);
+      }
+    }
+  }
+
+  ctx.restore();
+
+  // 底部荷叶边
+  ctx.fillStyle = 'rgba(252,247,236,0.92)';
+  for(let c = 0; c < cols; c += 2){
+    const n = nodes[(rows - 1) * cols + c];
+    halfDisc(Math.round(n.x), Math.round(n.y), 4, 'rgba(252,247,236,0.92)');
+  }
+}
+
+function updateCloths(animT, dt){
+  if(!cloths) cloths = [makeCloth(88, 135), makeCloth(345, 392)];
+  for(let i = 0; i < cloths.length; i++) {
+    stepCloth(cloths[i], animT, dt);
+    // Keep the curtain close to its resting silhouette, even after fast swipes.
+    for(const n of cloths[i].nodes) if(!n.pin){
+      const limit = settings.reduced ? 0.7 : 2;
+      n.x = clamp(n.x, n.restX - limit, n.restX + limit);
+      n.y = clamp(n.y, n.restY - 0.6, n.restY + 0.6);
+    }
+  }
+  mouse.lx = mouse.x; mouse.ly = mouse.y;
+}
+
+function drawCloths(L){
+  for(let i = 0; i < cloths.length; i++) drawCloth(cloths[i], L);
+}
+
+// ---------- 室内：窗台、盆栽、小猫、蜡烛 ----------
+function drawSill(){
+  ctx.fillStyle = '#b9835a';
+  ctx.fillRect(SX0, SY0, SX1 - SX0, 6);
+  ctx.fillStyle = '#8f5f3d';
+  ctx.fillRect(SX0, SY0 + 6, SX1 - SX0, SY1 - (SY0 + 6));
+  ctx.fillStyle = '#d8a87a';
+  ctx.fillRect(SX0, SY0, SX1 - SX0, 1);
+  ctx.fillStyle = 'rgba(0,0,0,0.08)';
+  for(let x = SX0 + 5; x < SX1 - 3; x += 14) ctx.fillRect(x, SY0 + 8, 1, SY1 - (SY0 + 8) - 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.fillRect(SX0, SY1 - 2, SX1 - SX0, 2);
+}
+
+function drawPlant(){
+  const bx = 198, top = SY0;
+  ctx.fillStyle = '#cf7a52';
+  ctx.fillRect(bx - 8, top - 14, 16, 3);
+  ctx.fillStyle = '#4a3526';
+  ctx.fillRect(bx - 6, top - 13, 12, 1);
+  ctx.fillStyle = '#b85c3a';
+  ctx.fillRect(bx - 7, top - 12, 14, 4);
+  ctx.fillRect(bx - 6, top - 8, 12, 6);
+  ctx.fillRect(bx - 5, top - 2, 10, 2);
+
+  ctx.fillStyle = '#3e7a32';
+  ctx.fillRect(bx - 1, top - 20, 1, 8);
+  ctx.fillRect(bx, top - 24, 1, 12);
+  ctx.fillRect(bx + 1, top - 18, 1, 6);
+  pcircle(bx - 4, top - 22, 3, '#4f8f3c');
+  pcircle(bx + 4, top - 25, 3, '#5aa54a');
+  pcircle(bx, top - 28, 3, '#3e7a32');
+  pcircle(bx + 1, top - 22, 2, '#6fb456');
+  pcircle(bx - 2, top - 27, 2, '#5aa54a');
+  pcircle(bx + 5, top - 21, 2, '#4f8f3c');
+}
+
+function drawCat(L, animT, wag){
+  const cx = 287, base = SY0;
+  const asleep = L.d < 0.22;
+  if(asleep){
+    const bob = -Math.abs(wag) * 1.3;
+    const by = base - 10 + bob;
+    pcircle(cx, by, 9, '#e09a4a');
+    pcircle(cx - 3, by - 2, 6, '#f0b064');
+    ctx.fillStyle = '#c97936';
+    ctx.fillRect(cx - 8, by - 7, 3, 3);
+    ctx.fillRect(cx - 1, by - 9, 3, 3);
+    ctx.fillStyle = '#6b4524';
+    ctx.fillRect(cx - 6, by - 3, 3, 1);
+    ctx.fillRect(cx - 1, by - 4, 3, 1);
+    ctx.fillStyle = '#c97936';
+    ctx.fillRect(cx + 2, by + 4, 7, 2);
+    ctx.fillRect(cx + 7, by + 2, 2, 4);
+    const zx = cx + 9, zy = by - 15 + Math.sin(animT * 1.5) * 1;
+    drawZ(zx, zy, 1);
+    drawZ(zx + 4, zy - 5, 1);
+    return;
+  }
+  pellipse(cx, base - 9, 11, 8, '#e09a4a');
+  pellipse(cx - 2, base - 7, 7, 5, '#f6dfc0');
+  ctx.fillStyle = '#c97936';
+  ctx.fillRect(cx - 6, base - 13, 2, 4);
+  ctx.fillRect(cx, base - 15, 2, 5);
+  ctx.fillRect(cx + 6, base - 13, 2, 4);
+  // 尾巴：平时轻轻晃，被点后明显甩几下
+  const wagPhase = animT * (wag > 0.5 ? 16 : 1.5);
+  const amp = wag > 0.5 ? 3 : 2;
+  ctx.fillStyle = '#e09a4a';
+  for(let i = 0; i < 9; i++){
+    const tx = cx + 10 + Math.sin(i * 0.55 + wagPhase) * amp;
+    const ty = base - 12 - i * 1.4;
+    ctx.fillRect(Math.round(tx), Math.round(ty), 2, 2);
+  }
+  ctx.fillStyle = '#c97936';
+  const tipX = cx + 10 + Math.sin(8 * 0.55 + wagPhase) * amp;
+  ctx.fillRect(Math.round(tipX), Math.round(base - 23), 2, 2);
+  pcircle(cx - 9, base - 19, 7, '#e09a4a');
+  ptri([cx - 15, base - 25], [cx - 11, base - 32], [cx - 8, base - 27], '#e09a4a');
+  ptri([cx - 6, base - 27], [cx - 3, base - 31], [cx - 2, base - 24], '#e09a4a');
+  ptri([cx - 13, base - 26], [cx - 11, base - 29], [cx - 9, base - 26], '#f0b064');
+  ptri([cx - 5, base - 27], [cx - 3, base - 29], [cx - 3, base - 26], '#f0b064');
+  pellipse(cx - 11, base - 17, 4, 3, '#f6dfc0');
+  const blink = Math.sin(animT * 0.35) > 0.985 || animT - fx.cat < 2;
+  ctx.fillStyle = '#2a1a12';
+  if(blink){
+    ctx.fillRect(cx - 13, base - 20, 2, 1);
+    ctx.fillRect(cx - 8, base - 20, 2, 1);
+  } else {
+    ctx.fillRect(cx - 13, base - 20, 2, 2);
+    ctx.fillRect(cx - 8, base - 20, 2, 2);
+  }
+  ctx.fillStyle = '#c96a5b';
+  ctx.fillRect(cx - 11, base - 16, 1, 1);
+  pline(cx - 13, base - 16, cx - 20, base - 17, 'rgba(255,255,255,0.6)');
+  pline(cx - 13, base - 15, cx - 20, base - 14, 'rgba(255,255,255,0.6)');
+  ctx.fillStyle = '#f6dfc0';
+  ctx.fillRect(cx - 6, base - 3, 4, 2);
+  ctx.fillRect(cx - 1, base - 3, 4, 2);
+}
+
+function drawZ(x, y, s){
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillRect(x, y, 3 * s, s);
+  ctx.fillRect(x + 2 * s, y + s, s, s);
+  ctx.fillRect(x, y + 2 * s, 3 * s, s);
+}
+
+function drawCandle(L, animT, flick){
+  const cx = 240, top = SY0;
+  ctx.fillStyle = '#8a5f3f';
+  ctx.fillRect(cx - 6, top - 2, 12, 2);
+  ctx.fillStyle = '#f3ead6';
+  ctx.fillRect(cx - 3, top - 13, 6, 11);
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  ctx.fillRect(cx - 1, top - 13, 1, 11);
+  ctx.fillStyle = '#3a2a1f';
+  ctx.fillRect(cx, top - 15, 1, 3);
+  if(settings.candle){
+    const fl = 1 + Math.sin(animT * 9) * 0.25 + Math.sin(animT * 23) * 0.15 + flick;
+    const lean = Math.sin(animT * 24) * flick * 2;
+    pcircle(cx + lean, Math.round(top - 19), Math.round(2 * fl), '#ffb84a');
+    pcircle(cx + lean, Math.round(top - 20), Math.round(1.2 * fl), '#ffe08a');
+    ctx.fillStyle = '#fff6d0';
+    ctx.fillRect(Math.round(cx + lean), Math.round(top - 21), 1, 1);
+  }
+}
+
+// ---------- 时钟 ----------
+const FONT = {
+  '0': ['111','101','101','101','111'],
+  '1': ['010','110','010','010','111'],
+  '2': ['111','001','111','100','111'],
+  '3': ['111','001','111','001','111'],
+  '4': ['101','101','111','001','001'],
+  '5': ['111','100','111','001','111'],
+  '6': ['111','100','111','101','111'],
+  '7': ['111','001','010','010','010'],
+  '8': ['111','101','111','101','111'],
+  '9': ['111','101','111','001','111'],
+  ':': ['000','010','000','010','000'],
+  '-': ['000','000','111','000','000'],
+  ' ': ['000','000','000','000','000']
+};
+
+function drawText(x, y, str, scale, col){
+  ctx.fillStyle = col;
+  let cx = Math.round(x);
+  for(let i = 0; i < str.length; i++){
+    const glyph = FONT[str[i]] || FONT[' '];
+    for(let r = 0; r < 5; r++){
+      const row = glyph[r];
+      for(let c = 0; c < 3; c++){
+        if(row[c] === '1') ctx.fillRect(cx + c * scale, y + r * scale, scale, scale);
+      }
+    }
+    cx += 4 * scale;
+  }
+}
+
+function drawClock(date){
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  const col = (date.getSeconds() % 2 === 0) ? ':' : ' ';
+  const time = hh + col + mm + col + ss;
+  const dateStr = date.getFullYear() + '-' +
+    String(date.getMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getDate()).padStart(2, '0');
+
+  const ts = 2, ds = 1;
+  const tw = (time.length * 4 - 1) * ts;
+  const dw = (dateStr.length * 4 - 1) * ds;
+  const cx = 240;
+  const px = Math.round(cx - tw / 2);
+  const dx = Math.round(cx - dw / 2);
+
+  ctx.fillStyle = '#6b4a32';
+  ctx.fillRect(px - 8, 12, tw + 16, 38);
+  ctx.fillStyle = '#8a6242';
+  ctx.fillRect(px - 6, 14, tw + 12, 34);
+  ctx.fillStyle = '#523a28';
+  ctx.fillRect(px - 5, 15, tw + 10, 32);
+  drawText(px, 20, time, ts, '#ffe9c4');
+  drawText(dx, 34, dateStr, ds, '#d9c49a');
+}
+
+// ---------- 室内暖光与浮尘 ----------
+function drawMotes(L, animT){
+  if(L.d > 0.22) return;
+  ctx.fillStyle = 'rgba(255,232,180,0.45)';
+  for(let i = 0; i < 7; i++){
+    const px = GX0 + 6 + ((i * 43 + animT * (5 + i)) % (GLASS_W - 12));
+    const py = GY0 + 10 + ((i * 31 + animT * (3 + i * 0.7)) % (GY1 - GY0 - 18));
+    ctx.fillRect(Math.round(px), Math.round(py), 1, 1);
+  }
+}
+
+function drawAmbient(L){
+  if(!settings.candle) return;
+  const a = 0.45 + (1 - L.d) * 0.55;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createRadialGradient(240, SY0 - 18, 6, 240, SY0 - 18, 130);
+  g.addColorStop(0, 'rgba(255,170,70,' + (0.26 * a) + ')');
+  g.addColorStop(0.5, 'rgba(255,140,60,' + (0.09 * a) + ')');
+  g.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+// ---------- 墙壁与地板 ----------
+function drawWall(){
+  ctx.fillStyle = css(WALL);
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = css(WALL_DOT);
+  for(let y = 6; y < H; y += 12){
+    const off = (((y / 12) | 0) % 2) ? 6 : 0;
+    for(let x = off; x < W; x += 12) ctx.fillRect(x, y, 2, 2);
+  }
+  ctx.fillStyle = css(BASE);
+  ctx.fillRect(0, 330, W, 12);
+  ctx.fillStyle = css(FLOOR);
+  ctx.fillRect(0, 342, W, H - 342);
+}
+
+// ---------- 显示与主循环 ----------
+function blit(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = window.innerWidth, h = window.innerHeight;
+  if(stage.width !== Math.round(w * dpr) || stage.height !== Math.round(h * dpr)){
+    stage.width = Math.round(w * dpr);
+    stage.height = Math.round(h * dpr);
+  }
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sctx.imageSmoothingEnabled = false;
+  const s = Math.min(w / W, h / H);
+  const dw = W * s, dh = H * s;
+  const dx = (w - dw) / 2, dy = (h - dh) / 2;
+  view.s = s; view.dx = dx; view.dy = dy;
+  sctx.fillStyle = css(WALL);
+  sctx.fillRect(0, 0, w, h);
+  if(dy + dh < h){
+    sctx.fillStyle = css(FLOOR);
+    sctx.fillRect(0, dy + dh, w, h - (dy + dh));
+  }
+  sctx.drawImage(off, dx, dy, dw, dh);
+}
+
+function render(){
+  const now = currentTime();
+  const t = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+  const animT = sceneTime();
+  const dt = lastAnimT === null ? 1 / 60 : Math.min(1 / 30, animT - lastAnimT);
+  lastAnimT = animT;
+  const L = lighting(t);
+  const horizon = horizonY(t, animT);
+
+  lastCelestial = null;
+  drawWall();
+  drawRod();
+  drawClock(new Date());
+  ctx.save();
+  ctx.beginPath(); ctx.rect(GX0, GY0, GLASS_W, GLASS_H); ctx.clip();
+  drawSky(L, t, animT, horizon, now);
+  drawSea(L, t, animT, horizon);
+  drawBoat(L, animT, horizon);
+  drawOutside(L, animT, horizon);
+  ctx.restore();
+  drawFrame();
+  updateCloths(animT, dt);
+  drawCloths(L);
+  drawSill();
+  drawPlant();
+  drawCat(L, animT, catKick(fx.cat, animT));
+  drawCandle(L, animT, candleKick(fx.candle, animT));
+  drawMotes(L, animT);
+  drawAmbient(L);
+  drawDetails(L, animT);
+  blit();
+}
+
+function currentTime(){
+  const now = new Date();
+  if(settings.time !== "live") { now.setHours(Number(settings.time), 0, 0, 0); return now; }
+  const m = /[?&]t=(\d{1,2}):(\d{2})/.exec(location.search);
+  if(m){
+    now.setHours(parseInt(m[1], 10), parseInt(m[2], 10), 0, 0);
+  }
+  return now;
+}
+
+// 把鼠标坐标映射回内部低分辨率画布
+function toScene(clientX, clientY){
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left - view.dx) / view.s,
+    y: (clientY - rect.top - view.dy) / view.s
+  };
+}
+
+function setMouse(clientX, clientY){
+  const p = toScene(clientX, clientY);
+  if(!mouse.active){ mouse.lx = p.x; mouse.ly = p.y; mouse.active = true; }
+  mouse.x = p.x; mouse.y = p.y;
+}
+
+function onPointerDown(e){
+  const p = toScene(e.clientX, e.clientY);
+  if(!mouse.active){ mouse.lx = p.x; mouse.ly = p.y; mouse.active = true; }
+  mouse.x = p.x; mouse.y = p.y;
+  const now = performance.now() / 1000;
+  if(p.x >= 264 && p.x <= 308 && p.y >= 252 && p.y <= 296){ fx.cat = now; return; }
+  if(p.x >= 230 && p.x <= 252 && p.y >= 264 && p.y <= 296){ fx.candle = now; return; }
+}
+
+function onPointerMove(e){ setMouse(e.clientX, e.clientY); }
+function onPointerLeave(){
+  mouse.active = false;
+  mouse.x = -999; mouse.y = -999;
+  mouse.lx = -999; mouse.ly = -999;
+}
+
+window.addEventListener('resize', blit);
+stage.addEventListener('pointermove', onPointerMove);
+stage.addEventListener('pointerleave', onPointerLeave);
+</script>
+<script src="sea-audio.js"></script>
+<script src="retreat.js"></script>
+</body>
+</html>

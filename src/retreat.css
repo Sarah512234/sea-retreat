@@ -1,0 +1,25 @@
+:root { color-scheme: dark; font-family: "Microsoft YaHei", sans-serif; }
+body { background:#cba482; }
+#dragbar { height:24px; background:linear-gradient(#533c292b,transparent); }
+#dragbar span { position:absolute;left:16px;top:9px;font-size:9px;letter-spacing:2px;color:#624a36;opacity:.75; }
+#window-actions { position:fixed;right:9px;top:3px;z-index:6;-webkit-app-region:no-drag; }
+#window-actions button { color:#654c38;padding:3px 7px;font-size:10px; }
+.caption { position:fixed;left:0;right:0;bottom:54px;display:flex;justify-content:center;align-items:center;gap:7px;pointer-events:none;color:#f5dfbd;font-size:11px;letter-spacing:2px;text-shadow:0 1px 3px #573c29; }
+.dot { width:4px;height:4px;background:#dfe8bb;border-radius:50%; }
+.controls { position:fixed;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:3px;padding:5px;background:#3f3027d9;border:1px solid #ebd4aa38;border-radius:13px;box-shadow:0 4px 18px #291c2526;opacity:.35;transition:opacity .6s;white-space:nowrap; }
+body:hover .controls,.controls:focus-within { opacity:1; }
+button { font:11px "Microsoft YaHei",sans-serif;color:#e5d5ba;background:transparent;border:0;border-radius:8px;padding:7px 9px;cursor:pointer; }
+button:hover,button[aria-pressed=true] { background:#dcc39826;color:#fff1d6; }
+button:focus-visible { outline:2px solid #e9d8ab;outline-offset:1px; }
+#guide { position:fixed;bottom:65px;left:50%;transform:translateX(-50%);width:max-content;max-width:85vw;padding:14px 18px;border:1px solid #dfcda552;background:#453a30ef;color:#f0dec1;border-radius:12px;font-size:12px;line-height:2; }
+#audio-panel { position:fixed;bottom:65px;left:50%;transform:translateX(-50%);width:280px;max-width:85vw;padding:16px 18px;border:1px solid #dfcda552;background:#453a30f5;color:#f0dec1;border-radius:12px;font-size:12px; }
+#audio-panel label { display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px; }
+#audio-panel select { max-width:210px;background:#342c26;color:#f0dec1;border:1px solid #bda98266;padding:6px;border-radius:6px; }
+#audio-panel input { width:180px;accent-color:#d9bc8e; }
+#audio-panel p { font-size:10px;line-height:1.7;color:#c9b89c;margin:6px 0 0; }
+#toast { position:fixed;left:50%;top:17%;transform:translate(-50%,5px);pointer-events:none;background:#3b3936d9;color:#f8e7c9;border:1px solid #e9d7b02a;padding:9px 16px;border-radius:20px;font-size:12px;opacity:0;transition:opacity .5s,transform .5s;white-space:nowrap; }
+#toast.visible { opacity:1;transform:translate(-50%,0); }
+#breathing { position:fixed;top:29%;left:50%;transform:translateX(-50%);text-align:center;color:#fff3d9;pointer-events:none;font-size:12px;text-shadow:0 1px 6px #344c60; }
+#breathing div { width:50px;height:50px;border:1px solid #fff6d9aa;border-radius:50%;margin:0 auto 20px;box-shadow:0 0 25px #fff0c825; }
+@media(max-width:480px) { button { padding:7px 6px;font-size:10px; } #dragbar span { font-size:8px;letter-spacing:1px; } }
+@media(prefers-reduced-motion:reduce) { * { transition:none!important; } }
