@@ -71,4 +71,4 @@ git remote add origin https://github.com/<你的用户名>/pixel-sea-window.git
 git push -u origin main
 ```
 
-推送前请先到 GitHub 新建一个空仓库，把上面的 `<你的用户名>` 换成你自己的账号名。
+
